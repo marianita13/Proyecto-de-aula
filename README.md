@@ -59,3 +59,47 @@ python -m unittest discover -s tests -v
 - Antes de ajustar los niveles de concurrencia, revisa que la máquina siga respondiendo normalmente y que el proceso de la API no presente errores.
 
 La siguiente etapa será usar las mediciones para seleccionar y justificar una función \(T(x)\), definir \(f(x)=T(x)-T_{\mathrm{máximo}}\), e implementar y validar el método de la secante.
+
+## Etapa 2: método de la secante para estimar capacidad
+
+El prototipo ya incluye un modelo didáctico de tiempo de respuesta y la implementación del método de la secante.
+
+```python
+from api.main import estimate_users_for_limit
+
+result = estimate_users_for_limit(max_response_time=2.0, x0=200.0, x1=250.0)
+print(result)
+# {'root': 234.2329219201431, 'iterations': 4, 'max_users_under_limit': 234}
+```
+
+La ecuación base es:
+
+\[
+T(x)=0.00002x^2 + 0.003x + 0.2
+\]
+
+con
+
+\[
+f(x)=T(x)-2
+\]
+
+y la raíz aproximada se obtiene con el método de la secante. En una medición real, se reemplaza este modelo con una función ajustada a los datos obtenidos en k6 y se repite el procedimiento con la tolerancia y los puntos iniciales adecuados.
+
+## Interfaz gráfica con Streamlit
+
+Puedes abrir la aplicación visual con:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m streamlit run streamlit_app.py
+```
+
+La interfaz permite:
+
+- ingresar el tiempo máximo tolerado
+- definir dos aproximaciones iniciales
+- ajustar la tolerancia y el número máximo de iteraciones
+- ver la tabla de iteraciones del método de la secante
+- visualizar la gráfica de la función y la raíz estimada
+- obtener la capacidad de usuarios máxima segura bajo el umbral seleccionado
