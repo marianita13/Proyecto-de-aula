@@ -12,6 +12,7 @@ const levelStart = (index) =>
   `${FIRST_LEVEL_START_SECONDS + index * (LEVEL_DURATION_SECONDS + LEVEL_GAP_SECONDS)}s`;
 
 export const options = {
+  summaryTrendStats: ['avg', 'min', 'max', 'p(95)'],
   scenarios: {
     warmup: {
       executor: 'constant-vus',

@@ -1,10 +1,69 @@
-# Proyecto de Métodos Numéricos: método de la secante
+# Estimación experimental de capacidad con el método de la secante
 
-El proyecto estima la concurrencia asociada a un límite de tiempo de respuesta. Esta primera etapa crea una API local y un ensayo k6 reproducible. La tarea de `/work` es sintética: sirve para practicar la medición, no para afirmar la capacidad de una aplicación real.
+## Objetivo
 
-## 1. Preparar el entorno
+El proyecto estima el nivel de usuarios virtuales concurrentes asociado a un límite de
+tiempo de respuesta. k6 genera solicitudes a la API local; Python resume las muestras,
+ajusta una función cuadrática a sus percentiles p95 y aplica el método de la secante.
+No se declara una capacidad si los datos no cubren el umbral o la raíz queda fuera del
+rango probado.
 
-Desde esta carpeta, en PowerShell:
+La ruta `/work` realiza una tarea sintética y acotada para el experimento. Los resultados
+describen únicamente esta API, máquina, configuración y ejecución; no equivalen a la
+capacidad de un servicio en producción.
+
+## Fundamento matemático
+
+La variable independiente es \(x\), cantidad de VUs. La variable dependiente \(T(x)\)
+es el p95 de duración medido por k6, convertido de milisegundos a segundos. Con los
+niveles válidos del CSV, NumPy ajusta por mínimos cuadrados:
+
+\[
+T(x)=ax^2+bx+c
+\]
+
+Los coeficientes se estiman de las mediciones; no hay una función de respuesta fija en
+el código. Se reporta \(R^2\) para describir qué tan bien representa el ajuste los datos.
+Un \(R^2 < 0.90\) se advierte como ajuste poco representativo. El gráfico y la secante
+se limitan al rango de concurrencia medido.
+
+Para un umbral configurable \(T_{\max}\), el método de la secante busca la raíz de:
+
+\[
+f(x)=ax^2+bx+c-T_{\max}=0
+\]
+
+\[
+x_{n+1}=x_n-\frac{f(x_n)(x_n-x_{n-1})}{f(x_n)-f(x_{n-1})}
+\]
+
+Los valores iniciales se toman de niveles experimentales adyacentes alrededor del
+cruce. La capacidad entera se obtiene como \(\lfloor x_{\text{raíz}}\rfloor\) y se
+verifica que la respuesta del modelo en ese entero no exceda el límite. Si el CSV no
+alcanza el umbral, no se presenta una capacidad: hay que probar más concurrencia.
+La parada usa el error relativo aproximado entre iteraciones,
+\(E_a=|(x_n-x_{n-1})/x_n|\times100\%\), con tolerancia inicial de **0.05 %**.
+
+## Arquitectura
+
+- `api/main.py`: API FastAPI con `/health` y `/work`.
+- `loadtest/scenarios.js`: ensayo local k6 con niveles de 1, 2, 4, 8, 12, 24, 48 y 96 VUs.
+- `results/carga.csv`: salida cruda de k6 (muestras por métrica).
+- `api/analysis.py`: lectura del CSV con Pandas, validación, resumen por nivel,
+  ajuste cuadrático, cálculo de R² y cálculo de capacidad.
+- `api/secant.py`: implementación independiente del método de la secante.
+- `results/mediciones.csv`: resumen normalizado generado por el analizador.
+- `streamlit_app.py`: visualización de los datos, el ajuste y la estimación.
+
+## Tecnologías
+
+Python, FastAPI, Uvicorn, k6, Pandas, NumPy, Matplotlib y Streamlit. SciPy no es
+necesario para este ajuste: `numpy.polyfit` resuelve los mínimos cuadrados y se mantiene
+la secante implementada explícitamente para que el procedimiento sea visible y evaluable.
+
+## Instalación en Windows
+
+Desde PowerShell, en la carpeta del proyecto:
 
 ```powershell
 python -m venv .venv
@@ -12,94 +71,87 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-## 2. Iniciar la API local
+## Ejecutar la API
+
+En una terminal:
 
 ```powershell
 python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
-La API escucha solo en el equipo local. En otra terminal, comprueba:
+Comprueba en otra terminal:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
 Invoke-RestMethod http://127.0.0.1:8000/work
 ```
 
-## 3. Ejecutar el ensayo de carga
+La API escucha en loopback. Ejecuta las pruebas únicamente en esta API propia o en un
+sistema para el que tengas autorización.
 
-Instala k6 siguiendo su documentación oficial. Con la API todavía activa, crea el directorio de resultados y ejecuta el ensayo:
+## Generar mediciones con k6
+
+Instala k6 y confirma que `k6 version` funciona. Mantén la API activa. Desde la raíz
+del proyecto:
 
 ```powershell
 New-Item -ItemType Directory -Force results
+k6 run --out csv=results/carga.csv loadtest/scenarios.js
 ```
 
-El ensayo calienta la API y luego mide niveles secuenciales de 1, 2, 4, 8, 12, 24, 48 y 96 usuarios virtuales durante 15 segundos cada uno. La pausa entre niveles ayuda a distinguir sus mediciones. La duración total es de aproximadamente 144 segundos.
+El ensayo calienta el servicio y luego mide ocho niveles, secuencialmente, durante 15
+segundos cada uno, con pausas entre niveles. La salida cruda conserva métricas por
+solicitud; el resumen de k6 muestra promedio, mínimo, máximo y p95.
 
-Guarda este ensayo ampliado en un archivo distinto para conservar la primera medición:
+Convierte el CSV crudo en una tabla resumida por nivel:
 
 ```powershell
-k6 run --out csv=results/carga_ampliada.csv loadtest/scenarios.js
+python -m api.analysis --input results/carga.csv --output results/mediciones.csv
 ```
 
-La primera ejecución registró p95 de 13,23 ms con 1 usuario y 111,23 ms con 12, sin solicitudes fallidas; por tanto, no alcanzó el umbral ilustrativo de 2 segundos. En el resumen de k6 y en `results/carga_ampliada.csv`, conserva para cada nivel la duración de respuesta (`http_req_duration`), especialmente `p(95)`, y la tasa de solicitudes fallidas. No declares una capacidad si hay errores o si el nivel no se mantuvo estable.
+El resumen incluye VUs, solicitudes, promedio, mínimo, máximo y p95 en segundos, además
+del porcentaje de solicitudes fallidas. El analizador omite escenarios incompletos o
+con valores inválidos. En el ensayo existente, el archivo contiene niveles hasta 12 VUs;
+el p95 máximo observado es aproximadamente 0.1112 s, por debajo de 2 s. Por tanto,
+esos datos no demuestran una capacidad máxima para el umbral de 2 s; el nuevo ensayo
+debe completar niveles mayores.
 
-La prueba genera carga solo en la API local. Si el equipo se vuelve lento o notas un comportamiento anormal, detén k6 con `Ctrl+C`; los resultados ya escritos en el CSV se conservan.
+Si k6 o la API causan un uso excesivo de recursos, detén el ensayo con `Ctrl+C`. No
+ejecutes cargas contra servicios de terceros.
 
-## 4. Validar la API
+## Ejecutar Streamlit
+
+Desde la raíz del proyecto:
+
+```powershell
+python -m streamlit run streamlit_app.py --server.address 127.0.0.1
+```
+
+La aplicación lee `results/carga.csv` directamente al cargar y al pulsar **Recargar
+datos de carga.csv**. Muestra los datos válidos por nivel, la gráfica p95, la curva
+ajustada y R². Solo muestra raíz y capacidad entera si las mediciones cubren el umbral
+y el resultado queda dentro del rango experimental. Para actualizar tras una prueba,
+vuelve a generar `results/carga.csv` con k6 y pulsa el botón de recarga.
+
+## Pruebas unitarias
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-## Criterios para el experimento
+## Interpretación y limitaciones
 
-- Ejecuta la prueba solo contra esta API local o contra un sistema propio/autorizado. No cambies el destino del guion para apuntar a servicios de terceros.
-- Mantén iguales la máquina, la configuración, la versión del código y las condiciones de red durante las mediciones; registra esos datos en el informe.
-- Repite el ensayo y reporta la variabilidad. Un resultado de k6 refleja usuarios virtuales y esta operación sintética, no usuarios reales ni una capacidad universal.
-- Antes de ajustar los niveles de concurrencia, revisa que la máquina siga respondiendo normalmente y que el proceso de la API no presente errores.
-
-La siguiente etapa será usar las mediciones para seleccionar y justificar una función \(T(x)\), definir \(f(x)=T(x)-T_{\mathrm{máximo}}\), e implementar y validar el método de la secante.
-
-## Etapa 2: método de la secante para estimar capacidad
-
-El prototipo ya incluye un modelo didáctico de tiempo de respuesta y la implementación del método de la secante.
-
-```python
-from api.main import estimate_users_for_limit
-
-result = estimate_users_for_limit(max_response_time=2.0, x0=200.0, x1=250.0)
-print(result)
-# {'root': 234.2329219201431, 'iterations': 4, 'max_users_under_limit': 234}
-```
-
-La ecuación base es:
-
-\[
-T(x)=0.00002x^2 + 0.003x + 0.2
-\]
-
-con
-
-\[
-f(x)=T(x)-2
-\]
-
-y la raíz aproximada se obtiene con el método de la secante. En una medición real, se reemplaza este modelo con una función ajustada a los datos obtenidos en k6 y se repite el procedimiento con la tolerancia y los puntos iniciales adecuados.
-
-## Interfaz gráfica con Streamlit
-
-Puedes abrir la aplicación visual con:
-
-```powershell
-python -m pip install -r requirements.txt
-python -m streamlit run streamlit_app.py
-```
-
-La interfaz permite:
-
-- ingresar el tiempo máximo tolerado
-- definir dos aproximaciones iniciales
-- ajustar la tolerancia y el número máximo de iteraciones
-- ver la tabla de iteraciones del método de la secante
-- visualizar la gráfica de la función y la raíz estimada
-- obtener la capacidad de usuarios máxima segura bajo el umbral seleccionado
+- Cada punto corresponde a VUs de k6, no necesariamente a personas o sesiones reales.
+- El p95 se calcula a partir de las muestras crudas de cada escenario; errores y filas
+  incompletas no se ocultan y los escenarios inválidos se reportan.
+- Se requieren al menos tres niveles válidos distintos para ajustar la cuadrática;
+  se recomienda medir más niveles y repetir la prueba.
+- Un ajuste cuadrático puede no representar la respuesta real del servidor. R² bajo,
+  errores de carga o alta variabilidad reducen la confianza de la estimación.
+- La secante no garantiza convergencia para cualquier par inicial. Se verifican
+  denominadores, valores finitos, tolerancia y máximo de iteraciones.
+- No se extrapola: la raíz debe estar dentro de los niveles experimentales y los datos
+  deben mostrar un cruce del umbral. Si no se alcanza el límite, se necesitan más
+  mediciones de concurrencia.
+- La carpeta `results/` está excluida por `.gitignore`; los CSV generados se conservan
+  localmente y no se incorporan al control de versiones automáticamente.
